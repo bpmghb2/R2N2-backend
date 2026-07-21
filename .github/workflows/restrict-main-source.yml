@@ -1,0 +1,20 @@
+name: Restringir origem do PR para main
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches:
+      - main
+
+jobs:
+  check-source-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🔒 Só permite PR para main vindo da develop
+        run: |
+          if [ "${{ github.head_ref }}" != "develop" ]; then
+            echo "❌ PR bloqueado: só é permitido merge para 'main' a partir da branch 'develop'."
+            echo "Branch de origem detectada: ${{ github.head_ref }}"
+            exit 1
+          fi
+          echo "✅ Origem válida (develop)."
