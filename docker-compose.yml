@@ -1,0 +1,20 @@
+services:
+  backend:
+    build: .
+    container_name: rn-gerenciadora-backend${CONTAINER_SUFFIX}
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT}:3002"
+    env_file:
+      - .env
+    networks:
+      - rn-gerenciadora-net
+      - infra-net
+    # Postgres NÃO faz parte deste compose: é o container compartilhado
+    # "postgres-shared" (rede infra-net), usado por múltiplos projetos na VPS.
+
+networks:
+  rn-gerenciadora-net:
+    external: true
+  infra-net:
+    external: true
