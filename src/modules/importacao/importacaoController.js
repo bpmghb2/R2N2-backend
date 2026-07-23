@@ -10,7 +10,10 @@ const ImportacaoController = {
   // POST /api/importacao — recebe o JSON do backup e importa (idempotente).
   async importar(req, res, next) {
     try {
-      const dados = req.body;
+      // Aceita o backup "cru" no corpo OU encapsulado: { backup, manterSenha }.
+      const body = req.body || {};
+      const encapsulado = body && typeof body === 'object' && body.backup && typeof body.backup === 'object';
+      const dados = encapsulado ? body.backup : body;
       if (!dados || typeof dados !== 'object' || (!dados.database && !dados.settings)) {
         return res.status(400).json({
           success: false,
@@ -19,7 +22,18 @@ const ImportacaoController = {
       }
 
       const senhaPadrao = req.query.senhaPadrao || undefined;
-      const relatorio = await importarBackup(dados, { senhaPadrao });
+      // Importação Completa substitui o banco atual pelo legado por padrão.
+      // Use ?modo=mesclar para preservar o que já existe (idempotente).
+      const modo = req.query.modo === 'mesclar' ? 'mesclar' : 'substituir';
+
+      // "Manter acesso": aplica a senha informada ao PRÓPRIO usuário autenticado
+      // (o e-mail vem do token, nunca do corpo — impede trocar a senha de terceiros).
+      const manterSenha = encapsulado && body.manterSenha ? String(body.manterSenha) : null;
+      const manterAcesso = manterSenha && req.usuario?.email
+        ? { email: req.usuario.email, senha: manterSenha }
+        : undefined;
+
+      const relatorio = await importarBackup(dados, { senhaPadrao, modo, manterAcesso });
 
       logger.info('Importação de backup concluída', {
         usuario: req.usuario?.email,

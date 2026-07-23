@@ -82,6 +82,34 @@ const usuariosModel = {
     return rows[0] || null;
   },
 
+  /** Busca por e-mail INCLUINDO excluídos (para resolver conflito de UNIQUE ao recriar). */
+  async buscarPorEmailQualquer(email) {
+    const [rows] = await execute(
+      `SELECT ${COLUNAS_PUBLICAS}, deleted_at FROM usuarios WHERE email = $1`,
+      [email.trim().toLowerCase()]
+    );
+    return rows[0] || null;
+  },
+
+  /** Reativa (restaura) um usuário que estava excluído/inativo, sobrescrevendo os dados. */
+  async reativar(id, dados) {
+    const [rows] = await execute(
+      `UPDATE usuarios SET
+         nome = $1, senha_hash = $2, perfil = $3,
+         acesso_configuracoes = $4, acesso_controles = $5,
+         ativo = TRUE, deleted_at = NULL, deletado_por = NULL,
+         precisa_trocar_senha = $6, criado_por = $7, updated_at = NOW()
+       WHERE id = $8
+       RETURNING ${COLUNAS_PUBLICAS}`,
+      [
+        dados.nome, dados.senha_hash, dados.perfil,
+        dados.acesso_configuracoes ?? false, dados.acesso_controles ?? false,
+        dados.precisa_trocar_senha ?? false, dados.criado_por || null, id
+      ]
+    );
+    return rows[0];
+  },
+
   async criar(dados) {
     const [rows] = await execute(
       `INSERT INTO usuarios

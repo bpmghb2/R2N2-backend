@@ -37,5 +37,6 @@ router.post('/refresh', AuthController.refresh);
 router.get('/me', autenticacao, AuthController.me);
 router.post('/logout', autenticacao, AuthController.logout);
 router.post('/trocar-senha', autenticacao, AuthController.trocarSenha);
+router.post('/verificar-senha-mestra', autenticacao, AuthController.verificarSenhaMestra);
 
 module.exports = router;

@@ -133,10 +133,15 @@ const cotacoesService = {
       frozen_remaining_days: null
     }, usuario?.id);
 
+    // Resolve o NOME do fornecedor (o approvedSupplierId é o external_id "sup-...").
+    const completa = await cotacoesModel.buscarCompleta(id);
+    const forn = (completa?.suppliers || []).find((s) => s.id === approvedSupplierId);
+    const nomeFornecedor = forn?.name || approvedSupplierId;
+
     await cotacoesModel.adicionarHistorico(id, {
       type: 'approval', fromStatus: atual.status, toStatus: status,
       user: usuario?.email || 'Sistema',
-      message: `Cotação aprovada. Fornecedor adquirido: ${approvedSupplierId}.`,
+      message: `Cotação aprovada. Fornecedor adquirido: ${nomeFornecedor}.`,
       justification: justificativa
     });
     return cotacoesModel.buscarCompleta(id);

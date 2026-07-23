@@ -11,7 +11,7 @@ const router = Router();
  * @swagger
  * /importacao:
  *   post:
- *     summary: Importa um backup JSON (Firebase) para o banco R2DN (idempotente)
+ *     summary: Importa um backup JSON (Firebase) para o banco R2DN. Por padrão SUBSTITUI o banco atual pelo legado (?modo=mesclar para idempotente)
  *     tags: [Importação]
  *     security: [{ BearerAuth: [] }]
  *     requestBody:

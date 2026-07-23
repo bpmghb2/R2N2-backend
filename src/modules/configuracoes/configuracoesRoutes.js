@@ -40,4 +40,15 @@ router.put('/', autenticacao, verificarPermissao('configuracoes:editar'),
 router.get('/api-key', autenticacao, verificarPermissao('configuracoes:editar'), ConfiguracoesController.obterApiKey);
 router.post('/api-key', autenticacao, verificarPermissao('configuracoes:editar'), ConfiguracoesController.gerarApiKey);
 
+/**
+ * @swagger
+ * /configuracoes/senha-mestra:
+ *   post:
+ *     summary: Define/atualiza a senha mestra (confirmação de status sensíveis)
+ *     tags: [Configurações]
+ *     security: [{ BearerAuth: [] }]
+ *     responses: { 200: { description: "Senha mestra definida" } }
+ */
+router.post('/senha-mestra', autenticacao, verificarPermissao('configuracoes:editar'), ConfiguracoesController.definirSenhaMestra);
+
 module.exports = router;
