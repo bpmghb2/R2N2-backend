@@ -2,6 +2,7 @@
 
 const { configuracoesModel } = require('./configuracoesModel');
 const auditService = require('../../services/auditService');
+const { hashSenha } = require('../../utils/senha');
 
 const ConfiguracoesController = {
   async obter(req, res, next) {
@@ -29,6 +30,24 @@ const ConfiguracoesController = {
     try {
       const apiKey = await configuracoesModel.obterApiKey();
       return res.status(200).json({ success: true, data: { apiKey } });
+    } catch (error) { next(error); }
+  },
+
+  // POST /configuracoes/senha-mestra — define/atualiza a senha mestra (admin).
+  async definirSenhaMestra(req, res, next) {
+    try {
+      const senha = String(req.body?.senha || '').trim();
+      if (senha.length < 4) {
+        return res.status(422).json({ success: false, message: 'A senha mestra deve ter ao menos 4 caracteres.' });
+      }
+      const hash = await hashSenha(senha);
+      await configuracoesModel.salvarSenhaMestraHash(hash, req.usuario.id);
+      await auditService.registrar({
+        acao: 'ALTERACAO', entidade: 'configuracoes', entidadeId: '1',
+        usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, ip: req.ip,
+        metadados: { operacao: 'definir_senha_mestra' }
+      });
+      return res.status(200).json({ success: true, message: 'Senha mestra definida.' });
     } catch (error) { next(error); }
   },
 

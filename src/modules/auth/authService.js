@@ -5,6 +5,7 @@
 'use strict';
 
 const usuariosModel = require('../usuarios/usuariosModel');
+const { configuracoesModel } = require('../configuracoes/configuracoesModel');
 const { verificarSenha, hashSenha } = require('../../utils/senha');
 const { gerarTokens, verificarRefreshToken } = require('../../utils/jwt');
 const { errNegocio } = require('../../utils/erros');
@@ -70,6 +71,36 @@ const authService = {
     const hash = await hashSenha(nova);
     await usuariosModel.atualizarSenha(usuario.id, hash, false);
     return { success: true };
+  },
+
+  /**
+   * Verifica a "senha mestra" para confirmar ações sensíveis.
+   * Usa a senha mestra configurada; se não houver, valida a senha do próprio usuário logado.
+   */
+  async verificarSenhaMestra(usuarioLogado, senha) {
+    const entrada = String(senha || '').trim();
+    if (!entrada) return false;
+
+    // 1) Prioridade: senha mestra definida no .env (SENHA_MESTRA).
+    const envMestra = process.env.SENHA_MESTRA;
+    if (envMestra && String(envMestra).trim()) {
+      const alvo = String(envMestra).trim();
+      // Comparação em tempo constante.
+      const a = Buffer.from(entrada);
+      const b = Buffer.from(alvo);
+      return a.length === b.length && require('crypto').timingSafeEqual(a, b);
+    }
+
+    // 2) Senha mestra definida no banco (bcrypt).
+    const hashMestra = await configuracoesModel.obterSenhaMestraHash();
+    if (hashMestra) {
+      return verificarSenha(entrada, hashMestra);
+    }
+
+    // 3) Sem senha mestra → confirma com a senha do próprio usuário.
+    const usuario = await usuariosModel.buscarPorEmailComSenha(usuarioLogado.email);
+    if (!usuario) return false;
+    return verificarSenha(entrada, usuario.senha_hash);
   },
 
   _publico(u) {

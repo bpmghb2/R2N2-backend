@@ -3,7 +3,10 @@
 // Reutilizado pelo endpoint HTTP e pelo script CLI (import-firebase-json.js).
 // - Corrige encoding (mojibake "Ã§" -> "ç")
 // - Importa configurações, usuários, cotações e controles
-// - Idempotente: pula registros já existentes (por número/e-mail)
+// - modo "substituir" (padrão): substitui o banco atual pelo legado
+//   (limpa cotações/controles e usuários, exceto o admin operacional).
+// - modo "mesclar": idempotente — pula registros já existentes
+//   (por número/e-mail) e preserva o que já está no banco.
 // =============================================================
 
 'use strict';
@@ -12,6 +15,12 @@ const { execute } = require('../../config/database');
 const { cotacoesModel } = require('../cotacoes/cotacoesModel');
 const { controlesModel } = require('../controles/controlesModel');
 const { hashSenha } = require('../../utils/senha');
+
+// E-mail do administrador operacional: nunca é removido/sobrescrito numa
+// substituição, para não travar o operador para fora do sistema.
+function adminProtegido() {
+  return String(process.env.ADMIN_EMAIL || 'financeiro@rngerenciadora.com.br').trim().toLowerCase();
+}
 
 // ---------- Correção de encoding (double-encoded UTF-8) ----------
 function corrigirTexto(s) {
@@ -64,6 +73,22 @@ function mapConfig(g = {}) {
 
 const PERFIS_VALIDOS = ['administrador', 'ti', 'gestor', 'padrao', 'visitante', 'cliente'];
 
+/**
+ * Limpa o banco atual para dar lugar ao legado (modo "substituir").
+ * - Apaga TODAS as cotações e controles (filhos via ON DELETE CASCADE).
+ * - Apaga TODOS os usuários, exceto o administrador operacional.
+ */
+async function limparParaSubstituicao(protectedEmail) {
+  // Cotações e controles: TRUNCATE ... CASCADE remove também as tabelas-filhas.
+  await execute('TRUNCATE TABLE cotacoes CASCADE');
+  await execute('TRUNCATE TABLE controles CASCADE');
+
+  // Zera as auto-referências antes de apagar para não violar FK usuarios->usuarios.
+  await execute('UPDATE usuarios SET criado_por = NULL, atualizado_por = NULL, deletado_por = NULL');
+  const [, res] = await execute('DELETE FROM usuarios WHERE lower(email) <> $1', [protectedEmail]);
+  return { usuariosRemovidos: res.rowCount || 0 };
+}
+
 async function importarConfig(global) {
   const c = mapConfig(global);
   const campos = Object.keys(c);
@@ -74,38 +99,65 @@ async function importarConfig(global) {
   );
 }
 
-async function importarUsuarios(global, senhaPadrao) {
+async function importarUsuarios(global, senhaPadrao, { modo, protectedEmail }) {
   const permissions = global.userPermissions || {};
   const registered = global.registeredUsers || {};
   const hash = await hashSenha(senhaPadrao);
 
   const emails = new Set([...Object.keys(permissions), ...Object.keys(registered)]);
   let criados = 0;
+  let atualizados = 0;
   let pulados = 0;
+  let preservados = 0;
 
   for (const emailBruto of emails) {
     const email = String(emailBruto).trim().toLowerCase();
     if (!email) continue;
+
+    // Nunca sobrescreve o admin operacional (preserva senha/sessão em uso).
+    if (modo === 'substituir' && email === protectedEmail) {
+      preservados++;
+      continue;
+    }
 
     const perm = permissions[emailBruto] || {};
     const nome = perm.name || registered[emailBruto] || email.split('@')[0];
     let perfil = perm.role || 'padrao';
     if (!PERFIS_VALIDOS.includes(perfil)) perfil = 'padrao';
 
-    const [existe] = await execute('SELECT id FROM usuarios WHERE email = $1', [email]);
-    if (existe.length) {
-      pulados++;
+    if (modo === 'mesclar') {
+      const [existe] = await execute('SELECT id FROM usuarios WHERE email = $1', [email]);
+      if (existe.length) {
+        pulados++;
+        continue;
+      }
+      await execute(
+        `INSERT INTO usuarios (nome, email, senha_hash, perfil, acesso_configuracoes, acesso_controles, ativo, precisa_trocar_senha)
+         VALUES ($1,$2,$3,$4,$5,$6, TRUE, TRUE)`,
+        [nome, email, hash, perfil, !!perm.hasSettingsAccess, !!perm.hasControlAccess]
+      );
+      criados++;
       continue;
     }
 
-    await execute(
+    // modo "substituir": upsert por e-mail (tabela já foi limpa, então normalmente insere).
+    const [, res] = await execute(
       `INSERT INTO usuarios (nome, email, senha_hash, perfil, acesso_configuracoes, acesso_controles, ativo, precisa_trocar_senha)
-       VALUES ($1,$2,$3,$4,$5,$6, TRUE, TRUE)`,
+       VALUES ($1,$2,$3,$4,$5,$6, TRUE, TRUE)
+       ON CONFLICT (email) DO UPDATE SET
+         nome = EXCLUDED.nome,
+         perfil = EXCLUDED.perfil,
+         acesso_configuracoes = EXCLUDED.acesso_configuracoes,
+         acesso_controles = EXCLUDED.acesso_controles,
+         ativo = TRUE,
+         updated_at = NOW()
+       RETURNING (xmax = 0) AS inserido`,
       [nome, email, hash, perfil, !!perm.hasSettingsAccess, !!perm.hasControlAccess]
     );
-    criados++;
+    if (res.rows?.[0]?.inserido) criados++;
+    else atualizados++;
   }
-  return { criados, pulados };
+  return { criados, atualizados, pulados, preservados };
 }
 
 async function importarCotacoes(quotations = []) {
@@ -138,27 +190,105 @@ async function importarControles(controles = []) {
   return { criados, pulados };
 }
 
+/** Lê o perfil/acessos atuais de um usuário (antes de uma substituição). */
+async function capturarUsuario(email) {
+  if (!email) return null;
+  const [rows] = await execute(
+    `SELECT nome, perfil, acesso_configuracoes, acesso_controles
+       FROM usuarios WHERE lower(email) = $1`,
+    [email]
+  );
+  return rows[0] || null;
+}
+
+/**
+ * Garante o acesso de um usuário após a importação: define a senha informada e
+ * restaura o perfil/acessos capturados antes da substituição. Assim, mesmo que a
+ * senha desse usuário divirja no backup importado, o operador mantém o acesso.
+ */
+async function garantirAcesso({ email, senha, perfilAtual }) {
+  const hash = await hashSenha(senha);
+  const base = perfilAtual || {
+    nome: email.split('@')[0],
+    perfil: 'administrador',
+    acesso_configuracoes: true,
+    acesso_controles: true,
+  };
+  let perfil = base.perfil || 'padrao';
+  if (!PERFIS_VALIDOS.includes(perfil)) perfil = 'padrao';
+
+  const [, res] = await execute(
+    `INSERT INTO usuarios (nome, email, senha_hash, perfil, acesso_configuracoes, acesso_controles, ativo, precisa_trocar_senha)
+     VALUES ($1,$2,$3,$4,$5,$6, TRUE, FALSE)
+     ON CONFLICT (email) DO UPDATE SET
+       senha_hash = EXCLUDED.senha_hash,
+       perfil = EXCLUDED.perfil,
+       acesso_configuracoes = EXCLUDED.acesso_configuracoes,
+       acesso_controles = EXCLUDED.acesso_controles,
+       ativo = TRUE,
+       precisa_trocar_senha = FALSE,
+       updated_at = NOW()
+     RETURNING (xmax = 0) AS inserido`,
+    [base.nome || email.split('@')[0], email, hash, perfil, !!base.acesso_configuracoes, !!base.acesso_controles]
+  );
+  return { email, perfil, criado: !!res.rows?.[0]?.inserido };
+}
+
 /**
  * Orquestra a importação completa a partir do objeto JSON bruto do backup.
  * @param {object} dadosBrutos - conteúdo do backup ({ database, settings, ... })
- * @param {{ senhaPadrao?: string }} [opts]
+ * @param {{ senhaPadrao?: string, modo?: 'substituir'|'mesclar',
+ *           manterAcesso?: { email: string, senha: string } }} [opts]
  * @returns {Promise<object>} relatório da importação
  */
 async function importarBackup(dadosBrutos, opts = {}) {
   const senhaPadrao = opts.senhaPadrao || process.env.IMPORT_DEFAULT_PASSWORD || 'Mudar@123';
+  const modo = opts.modo === 'mesclar' ? 'mesclar' : 'substituir';
+  const protectedEmail = adminProtegido();
   const dados = corrigirRecursivo(dadosBrutos);
 
   const global = dados.settings?.global || {};
   const quotations = dados.database?.main?.quotations || [];
   const controles = dados.database?.controles?.controles || [];
 
+  // "Manter acesso": e-mail do operador + nova senha desejada no banco importado.
+  const manterEmail = opts.manterAcesso?.email
+    ? String(opts.manterAcesso.email).trim().toLowerCase()
+    : null;
+  const manterSenha = opts.manterAcesso?.senha || null;
+
+  // Captura perfil/acessos do operador ANTES de limpar (para restaurar depois).
+  let perfilOperador = null;
+  if (manterEmail && manterSenha) {
+    perfilOperador = await capturarUsuario(manterEmail);
+  }
+
+  let limpeza = null;
+  if (modo === 'substituir') {
+    limpeza = await limparParaSubstituicao(protectedEmail);
+  }
+
   await importarConfig(global);
-  const usuarios = await importarUsuarios(global, senhaPadrao);
+  const usuarios = await importarUsuarios(global, senhaPadrao, { modo, protectedEmail });
   const cotacoes = await importarCotacoes(quotations);
   const ctrl = await importarControles(controles);
 
+  // Por último: aplica a senha do operador para garantir o acesso.
+  let acessoMantido = null;
+  if (manterEmail && manterSenha) {
+    acessoMantido = await garantirAcesso({
+      email: manterEmail,
+      senha: manterSenha,
+      perfilAtual: perfilOperador,
+    });
+  }
+
   return {
+    modo,
     config: true,
+    limpeza,
+    adminPreservado: modo === 'substituir' ? protectedEmail : null,
+    acessoMantido,
     usuarios,
     cotacoes,
     controles: ctrl,

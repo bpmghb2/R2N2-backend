@@ -80,6 +80,13 @@ const AuthController = {
     }
   },
 
+  async verificarSenhaMestra(req, res, next) {
+    try {
+      const ok = await authService.verificarSenhaMestra(req.usuario, req.body?.senha);
+      return res.status(200).json({ success: true, data: { ok } });
+    } catch (error) { next(error); }
+  },
+
   async logout(req, res) {
     // Stateless: o proxy BFF limpa os cookies. Registramos a auditoria.
     if (req.usuario) {

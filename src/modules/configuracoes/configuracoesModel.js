@@ -7,10 +7,12 @@
 const crypto = require('crypto');
 const { execute } = require('../../config/database');
 
-// Remove a chave de API do objeto retornado ao cliente (nunca expor no GET geral).
+// Remove segredos do objeto retornado ao cliente (nunca expor no GET geral).
 function semSegredos(row) {
   if (!row) return row;
-  const { api_bearer_key, ...publico } = row;
+  const { api_bearer_key, senha_mestra_hash, ...publico } = row;
+  // Expõe apenas um flag (nunca o hash) para a UI saber se já há senha mestra.
+  publico.senha_mestra_definida = !!senha_mestra_hash;
   return publico;
 }
 
@@ -34,6 +36,20 @@ const configuracoesModel = {
   async obterApiKey() {
     const [rows] = await execute('SELECT api_bearer_key FROM configuracoes WHERE id = 1');
     return rows[0]?.api_bearer_key || null;
+  },
+
+  /** Hash da senha mestra (uso interno: verificação). */
+  async obterSenhaMestraHash() {
+    const [rows] = await execute('SELECT senha_mestra_hash FROM configuracoes WHERE id = 1');
+    return rows[0]?.senha_mestra_hash || null;
+  },
+
+  /** Persiste o hash da senha mestra (já vem hasheada). */
+  async salvarSenhaMestraHash(hash, atualizadoPor) {
+    await execute(
+      `UPDATE configuracoes SET senha_mestra_hash = $1, atualizado_por = $2, updated_at = NOW() WHERE id = 1`,
+      [hash, atualizadoPor || null]
+    );
   },
 
   /** Gera, persiste e retorna uma nova chave de API (rotação). */

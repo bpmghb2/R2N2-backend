@@ -41,24 +41,32 @@ const usuariosService = {
   },
 
   async criar(dados, criadoPor) {
-    const existente = await usuariosModel.buscarPorEmail(dados.email);
-    if (existente) throw errNegocio(`Já existe um usuário com o e-mail "${dados.email}"`);
+    const existente = await usuariosModel.buscarPorEmailQualquer(dados.email);
 
     // Se acessos não vierem explicitamente, aplica defaults do perfil
     const defaults = acessosPorPerfil(dados.perfil);
-
-    const senha_hash = await hashSenha(dados.senha);
-    return usuariosModel.criar({
+    // Apara a senha (o login também apara — evita divergência por espaços).
+    const senha_hash = await hashSenha(String(dados.senha || '').trim());
+    const base = {
       nome: dados.nome.trim(),
-      email: dados.email,
       senha_hash,
       perfil: dados.perfil,
       acesso_configuracoes: dados.acesso_configuracoes ?? defaults.acesso_configuracoes,
       acesso_controles: dados.acesso_controles ?? defaults.acesso_controles,
-      ativo: dados.ativo ?? true,
       precisa_trocar_senha: dados.precisa_trocar_senha ?? false,
       criado_por: criadoPor
-    });
+    };
+
+    if (existente) {
+      // Usuário ativo com esse e-mail → conflito real.
+      if (!existente.deleted_at) {
+        throw errNegocio(`Já existe um usuário com o e-mail "${dados.email}"`);
+      }
+      // E-mail pertence a um usuário excluído → reativa (evita violar a UNIQUE).
+      return usuariosModel.reativar(existente.id, base);
+    }
+
+    return usuariosModel.criar({ ...base, email: dados.email, ativo: dados.ativo ?? true });
   },
 
   async atualizar(id, dados, atualizadoPor) {
@@ -70,8 +78,9 @@ const usuariosService = {
   async redefinirSenha(id, novaSenha, precisaTrocar = false) {
     const atual = await usuariosModel.buscarPorId(id);
     if (!atual) throw errNegocio('Usuário não encontrado');
-    if (novaSenha.length < 6) throw errNegocio('A senha deve ter ao menos 6 caracteres');
-    const hash = await hashSenha(novaSenha);
+    const senha = String(novaSenha || '').trim();
+    if (senha.length < 6) throw errNegocio('A senha deve ter ao menos 6 caracteres');
+    const hash = await hashSenha(senha);
     await usuariosModel.atualizarSenha(id, hash, precisaTrocar);
   },
 
